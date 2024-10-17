@@ -1,0 +1,754 @@
+---
+title: "pamtoolstest"
+output: html_document
+date: "2024-10-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library("pammtools")
+library(tidyverse)
+library(mgcv)
+library(readr)
+
+head(tumor)
+
+temp_tum <- tumor %>%
+  as_ped(Surv(days, status) ~.,  max_time =3034 # cut = seq(0, max(tumor$days), by = 100)
+         )
+
+head(temp_tum)
+
+temp_tum %>% filter(id==345)
+
+pam <- gam(ped_status ~ s(tend) + 
+                        sex + 
+                        age + 
+                        charlson_score + 
+                        transfusion +
+                        complications + 
+                        metastases + 
+                        resection,
+           data = temp_tum,
+           family = poisson(), # nicht binomial()??
+           offset = offset,
+           method = "REML")
+
+summary(pam)
+
+plot(pam)
+
+gam.check(pam)
+
+gg_smooth(temp_tum, pam, terms="tend") + xlab("time")
+
+gg_fixed(pam)
+
+exp(pam$coefficients) 
+
+```
+
+# estimators no term event in 4.1 just before 4.2
+
+
+# estimators with term event in 4.2 just before 4.3
+
+Aalen-Johannsen
+$$\hat{\mu}^T_{AJ}(t)=\sum_{k=1}^K k * (\hat p_{0k}(t)+\hat p_{0k}-(t))$$
+
+
+
+Nelson-Aalen
+$$\hat{\mu}^T_{NA}(t)=\sum_{s_j \leq t}\hat S *(s_j- ???1???)*\Delta\hat A^T(s_j)$$
+
+
+```{r}
+CalculateMeans <- function(repN, true_mean, scenario, output_name, boxplot = FALSE, term_event) {
+  tp <- c(40, 60, 80, 100)
+  if (term_event) {
+    source(paste0(dirHome, "fun_estimators_terminating.R"))
+  } else {
+    source(paste0(dirHome, "fun_estimators.R"))
+  }
+  
+  
+  data_recurr <- replicate(repN, simu_recurr(scenario$N, scenario$alpha,
+                                             cens = scenario$cens, gamma = scenario$gamma,
+                                             type2 = scenario$type2, m = scenario$m,
+                                             stat.depend = scenario$stat.depend,
+                                             cens.haz = scenario$cens.haz, death.haz = scenario$death.haz,
+                                             staggered = scenario$staggered, nondeg = scenario$nondeg,
+                                             stopcrit = scenario$stopcrit, EOS = scenario$EOS,
+                                             censRate = scenario$censRate
+  ),
+  simplify = FALSE
+  )
+  return(data_recurr)
+}
+
+True1 <- read_csv("saves/True1.rda")
+True2 <- read_csv("saves/True2.rda")
+True5 <- read_csv("saves/True5.rda")
+True6 <- read_csv("saves/True6.rda")
+True9 <- read_csv("saves/True9.rda")
+True10 <- read_csv("saves/True10.rda")
+
+
+temp <- CalculateMeans(repN=1, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[1]], output_name="Scenario1_N100", boxplot=TRUE, term_event=FALSE)
+
+
+```
+
+
+
+```{r rumtesten wie aj geht}
+# felipe komentare mit 3 hashtags
+# Aalen-Johansen - k*state-occupation probabilities
+get_mean_AJ <- function(data_recurr = data_recurr, tp) {
+  expected_mean_marcov <- lapply(seq_along(data_recurr), function(x) { ### jeweils nur einen der dfs
+    data <- data_recurr[[x]] ### unlist basically
+    EOS <- tp[length(tp)] ### endpunkt zum checken
+    ## transition matrix depend on I maximal number of events
+    data_recurr2 <- data[!(grepl("death", data$to)) & data$to != "cens", ] ### einfach nur "death" und "cens" rausmachen?? also nur noch nums
+    I <- max(as.numeric(data_recurr2$to)) ### maximale anzahl an events
+
+    tra <- matrix(FALSE, ncol = I + 2, nrow = I + 2) ### matrix mit ncol=nrow=maximale events + 2
+
+    for (i in 1:(I + 1)) {
+      tra[i, i + 1] <- TRUE ### basically nur diag mat aber beginnend bei 1,2
+    } ### jetzt beschreibt tra die möglichen schritte also von 0 zu 1, 1 zu 2 usw immer 1 drauf
+    cens_code <- "cens" # gibt an wie in den daten zensiert markiert wird
+
+    event_types <- c(0:(I + 1)) # welche ausprägungen gibts, also 0 bis maximale anzahl events plus 1 wegen zensiert
+    event_typesn <- c(1:(I + 1)) # das ist nur für das sapply später
+
+    ## mean by time-point
+    expected_mean_marcov_t <- sapply(tp, function(t) {# iteriert über alle beobachtungszeitpunkte
+      AJ <- etm(data, event_types, tra, cens_code, 0, tp[length(tp)], covariance = FALSE) ### ?etm easy dann
+      time_AJ <- AJ[["time"]][AJ[["time"]] <= t] # alle event times vor und am zeitpunkt t
+      last_time <- length(time_AJ) # wie viele events gabs vor und an t
+
+      expected_mean_marcov <- sum(sapply(event_typesn, function(i) {
+        # iteriert über die anzahl der event count ausprägungen
+        ## i*P(X(t)=i)
+        summand <- i * 
+          AJ[["est"]][1, i + 1, last_time]
+        # die wkeit bis zeitpunkt t in event anzahl ausprägung i gekommen zu sein
+        # wenn man i * auskommentiert addiert es sich nicht auf 1 vermutlich ist die gegen wkeit
+        # die wkeit für censoring
+        # mit i * und alle aufsummiert ist es der erwartungswert bis zeitpunkt t 
+        return(summand)
+      })) # das
+    # return(AJ)
+      })
+    return(expected_mean_marcov_t)
+  })
+}
+
+# temp2<-get_mean_AJ(temp, c(c(40, 60, 80, 100)))
+# 
+# temp2
+```
+
+```{r erstes scenario ausprobieren}
+#function true mean ### felipe iters kleiner
+trueMean <- function(scenario, tp, output_name){
+  iter <- 1000
+  data_recurr_true <- replicate(10, simu_recurr(iter, scenario$alpha, cens = FALSE, gamma = scenario$gamma, 
+                                                type2 = FALSE, m = scenario$m, stat.depend = FALSE, 
+                                                cens.haz = c(0, 0, 0, 0, 0), death.haz = scenario$death.haz,
+                                                staggered = scenario$staggered, nondeg = scenario$nondeg, 
+                                                stopcrit = scenario$stopcrit, 
+                                                EOS = scenario$EOS), simplify = FALSE)
+  
+  
+  ## temp
+  # plot(sort(unique(data_recurr_true[[1]]$entry_act)))
+  nevents <- lapply(seq_along(data_recurr_true), function(j) {
+    data_recurr_true[[j]] <- data_recurr_true[[j]][!(grepl("death", data_recurr_true[[j]]$to)), ]
+    mean_event <- sapply(tp, function(t) {
+      max_event <- aggregate(to ~ id, data = data_recurr_true[[j]][data_recurr_true[[j]]$exit <= t, ], max)
+      mean_event <- sum(as.numeric(max_event$to)) / iter
+      return(mean_event)
+    })
+    return(mean_event)
+  })
+  
+  true_mean <- rowMeans(matrix(unlist(nevents), nrow = length(tp)))
+  save(true_mean, 
+       # file = paste0("/home/alexandra/Documents/Recurrent_Events/Results_Rev/", output_name, ".rda"))
+       # ohne absolute pfade
+       file = paste0("saves/", output_name, ".rda"))
+  return(true_mean)
+}
+
+
+
+##function
+
+CalculateMeans <- function(repN, true_mean, scenario, output_name, boxplot = FALSE, term_event) {
+  tp <- c(40, 60, 80, 100)
+  if (term_event) {
+    source(paste0("fct/fun_estimators_terminating.R"))
+  } else {
+    source(paste0("fct/fun_estimators.R"))
+  }
+  
+  
+  data_recurr <- replicate(repN, simu_recurr(scenario$N, scenario$alpha,
+                                             cens = scenario$cens, gamma = scenario$gamma,
+                                             type2 = scenario$type2, m = scenario$m,
+                                             stat.depend = scenario$stat.depend,
+                                             cens.haz = scenario$cens.haz, death.haz = scenario$death.haz,
+                                             staggered = scenario$staggered, nondeg = scenario$nondeg,
+                                             stopcrit = scenario$stopcrit, EOS = scenario$EOS, censRate = scenario$censRate
+  ),
+  simplify = FALSE
+  )
+  
+  ### AJ
+  StudymeanAJ <- get_mean_AJ(data_recurr, tp)
+  
+  # meanAJ<-rowMeans(matrix(unlist(StudymeanAJ),nrow=length(tp)))
+  result_AJ <- sapply(seq_along(tp),
+    function(t) {
+      bias_rmse(matrix(unlist(StudymeanAJ), nrow = length(tp))[t, ], true_mean[t])
+    }
+  )
+  
+  
+  scenario <- ad_to_output(result_AJ, scenario, tp)
+  print("AJ finished")
+  
+  #### NA
+  StudymeanNA <- get_mean_NA(data_recurr, tp)
+  result_NA <- sapply(
+    seq_along(tp),
+    function(t) {
+      bias_rmse(matrix(unlist(StudymeanNA), nrow = length(tp))[t, ], true_mean[t])
+    }
+  )
+  
+  scenario <- ad_to_output(result_NA, scenario, tp)
+  print("NA finished")
+  
+  #### EB1= P(X_t=i) with KM
+  StudymeanEB1 <- get_mean_EB1(data_recurr, tp)
+  result_EB1 <- sapply(
+    seq_along(tp),
+    function(t) {
+      bias_rmse(matrix(unlist(StudymeanEB1), nrow = length(tp))[t, ], true_mean[t])
+    }
+  )
+  
+  scenario <- ad_to_output(result_EB1, scenario, tp)
+  print("EB1 finished")
+  
+  #### EB2= P(X_t=i) with AJ
+  StudymeanEB2 <- get_mean_EB2(data_recurr, tp)
+  result_EB2 <- sapply(
+    seq_along(tp),
+    function(t) {
+      bias_rmse(matrix(unlist(StudymeanEB2), nrow = length(tp))[t, ], true_mean[t])
+    }
+  )
+  
+  
+  scenario <- ad_to_output(result_EB2, scenario, tp)
+  print("EB2 finished")
+  
+  
+  
+  if (boxplot == TRUE) {
+    boxplotData <- data.frame(
+      scenario = rep(scenario$Scenario, repN),
+      AJ = matrix(unlist(StudymeanAJ), nrow = 4, ncol = repN)[3, ],
+      NAE = matrix(unlist(StudymeanNA), nrow = 4, ncol = repN)[3, ],
+      EB1 = matrix(unlist(StudymeanEB1), nrow = 4, ncol = repN)[3, ],
+      EB2 = matrix(unlist(StudymeanEB2), nrow = 4, ncol = repN)[3, ]
+    )
+    
+    # save(boxplotData, 
+    #      file = paste0("/home/alexandra/Documents/Recurrent_Events/Results_Rev/", "Boxplot_", output_name, ".rda"))
+    # save(boxplotData, 
+    #      file = paste0("results/", "Boxplot_", output_name, ".rda"))
+  }
+  
+  res_table <- data.frame(
+    estimator = c("AJ", "NA", "EB1", "EB2"),
+    BiasT40 = c(scenario[["AJ"]][2, 1], scenario[["NA"]][2, 1], scenario[["EB1"]][2, 1], scenario[["EB2"]][2, 1]),
+    BiasT60 = c(scenario[["AJ"]][2, 2], scenario[["NA"]][2, 2], scenario[["EB1"]][2, 2], scenario[["EB2"]][2, 2]),
+    BiasT80 = c(scenario[["AJ"]][2, 3], scenario[["NA"]][2, 3], scenario[["EB1"]][2, 3], scenario[["EB2"]][2, 3]),
+    BiasT100 = c(scenario[["AJ"]][2, 4], scenario[["NA"]][2, 4], scenario[["EB1"]][2, 4], scenario[["EB2"]][2, 4]),
+    RMSET40 = c(scenario[["AJ"]][3, 1], scenario[["NA"]][3, 1], scenario[["EB1"]][3, 1], scenario[["EB2"]][3, 1]),
+    RMSET60 = c(scenario[["AJ"]][3, 2], scenario[["NA"]][3, 2], scenario[["EB1"]][3, 2], scenario[["EB2"]][3, 2]),
+    RMSET80 = c(scenario[["AJ"]][3, 3], scenario[["NA"]][3, 3], scenario[["EB1"]][3, 3], scenario[["EB2"]][3, 3]),
+    RMSET100 = c(scenario[["AJ"]][3, 4], scenario[["NA"]][3, 4], scenario[["EB1"]][3, 4], scenario[["EB2"]][3, 4])
+  )
+  
+  # print(xtable(res_table, digits = c(0, 0, 2, 2, 2, 2, 2, 2, 2, 2)),
+  #       include.rownames = FALSE,
+  #       booktabs = TRUE#,
+  #       # file = paste0("/home/alexandra/Documents/Recurrent_Events/Results_Rev/", "Table_", output_name, ".tex")
+  #       # file = paste0("results/", "Table_", output_name, ".tex")
+  # )
+  # save(scenario,
+  #      file = paste0("/home/alexandra/Documents/Recurrent_Events/Results_Rev/", "ResultData_", output_name, ".rda"))
+  # save(scenario,
+  #      file = paste0("results/", "ResultData_", output_name, ".rda"))
+  print(res_table)
+  # print(boxplotData)
+}
+
+
+source("fct/simulation_recurrent_events.R")
+source("fct/Utils.R")
+source("ScenarioMasterfile.R")
+
+######
+library(doParallel)
+library(foreach)
+
+# Detect the number of cores
+numCores <- detectCores() - 1  # leave one core free
+cl <- makeCluster(numCores)
+registerDoParallel(cl)
+
+results <- foreach(scenario = list(scenarioMaster[[1]], scenarioMaster[[5]]), 
+                   .combine = 'c') %dopar% {
+    if (identical(scenario, scenarioMaster[[1]])) {
+        trueMean(scenario = scenario, c(40, 60, 80, 100), "True1")
+    } else {
+        trueMean(scenario = scenario, c(40, 60, 80, 100), "True2")
+    }
+                   }
+
+stopCluster(cl)
+
+True1 <- results[1:4]
+True2 <- results[5:8]
+######
+
+
+
+#true mean master
+True1 <- trueMean(scenario=scenarioMaster[[1]], c(40,60,80,100), "True1")
+True2 <- trueMean(scenario=scenarioMaster[[5]], c(40,60,80,100), "True2")
+True5 <- trueMean(scenario=scenarioMaster[[17]], c(40,60,80,100), "True5")
+True6 <- trueMean(scenario=scenarioMaster[[21]], c(40,60,80,100), "True6")
+True9 <- trueMean(scenario=scenarioMaster[[33]], c(40,60,80,100), "True9")
+True10 <- trueMean(scenario=scenarioMaster[[37]], c(40,60,80,100), "True10")
+
+trueMeanMaster <- list(True1, True2, True1, True2, True5, True6, True5, True6, True9, True10, True9, True10)
+trueMeanMaster <- list(True1, True2, True1, True2)
+#trueMeanMaster <- list(results[1:4], results[5:8])
+# save(trueMeanMaster, 
+#      file = paste0("/home/alexandra/Documents/Recurrent_Events/Results_Rev/trueMeanMaster.rda"))
+save(trueMeanMaster, 
+     file = paste0("results/trueMeanMaster.rda"))
+
+# load(file = paste0("/home/alexandra/Documents/Recurrent_Events/Results_Rev/trueMeanMaster.rda"))
+load(file = paste0("results/trueMeanMaster.rda"))
+
+
+#function calls
+#Scenario 1 Poisson, random censoring, no terminating eve
+set.seed(1234)
+Scenario1_N1<-CalculateMeans(repN=10, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[1]], output_name="Scenario1_N100", boxplot=TRUE, term_event=FALSE)
+Scenario1_N2<-CalculateMeans(repN=10, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[2]], output_name="Scenario1_N25", boxplot=FALSE, term_event=FALSE)
+Scenario1_N3<-CalculateMeans(repN=10, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[3]], output_name="Scenario1_N50", boxplot=FALSE, term_event=FALSE)
+Scenario1_N4<-CalculateMeans(repN=10, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[4]], output_name="Scenario1_N200", boxplot=FALSE, term_event=FALSE)
+
+
+# testen aber ich kriege die recurrent event data noch nicht zu laufen mit ped
+sim <- \(repN, true_mean, scenario) {
+data <- replicate(repN, simu_recurr(scenario$N, scenario$alpha,
+                                             cens = scenario$cens, gamma = scenario$gamma,
+                                             type2 = scenario$type2, m = scenario$m,
+                                             stat.depend = scenario$stat.depend,
+                                             cens.haz = scenario$cens.haz, death.haz = scenario$death.haz,
+                                             staggered = scenario$staggered, nondeg = scenario$nondeg,
+                                             stopcrit = scenario$stopcrit, EOS = scenario$EOS, 
+                                             censRate = scenario$censRate), simplify = FALSE)
+return(data)
+}
+
+library(pammtools)
+
+set.seed(111)
+
+tempdata <- sim(repN=1, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[1]])[[1]]
+tempdata 
+  
+  
+  
+# tempdata %>%
+#   mutate(event = ifelse(to != "cens", 1, 0)) %>% # event 1 wenn recurrent event passiert 0 bei "cens"
+#   as_ped(Surv(entry, exit, event) ~ 1,
+#          id = "id",
+#          transition = "to",
+#          cut = seq(min(tempdata$entry), max(tempdata$exit), length.out = 20))
+
+# data("staph")
+# staph 
+# staph %>%
+#   as_ped(
+#   formula     = Surv(t.start,t.stop,event) ~ hiv,
+#   id          = "id",
+#   transition  = "enum",
+#   timescale   = "gap",
+#   max_time    = 366) %>% filter(id==1)
+
+
+
+
+
+tempdata <- tempdata %>%
+  # filter(from!=0) %>%
+  mutate(event = ifelse(to != "cens", 1, 0)) %>% # event 1 wenn recurrent event passiert 0 bei "cens"
+  mutate(enum = from
+           # as.numeric(ifelse(to != "cens", to, from)) alte version
+         ) # %>%
+  # select(id, entry, exit, event, enum)
+
+
+
+temp <-  tempdata %>%
+  as_ped(Surv(entry, exit, event) ~ 1,
+         id = "id",
+         transition = "enum",
+         cut = quantile(tempdata$exit, probs = seq(0, 1, length.out = 21))) %>%
+  mutate(id = as.factor(id))
+
+## rumspielen mit 3 event arten 0 kein event 1 even und 2 zensiert ## vielleicht einfach aufs multistate warten
+temp <-  tempdata %>%
+  as_ped(Surv(entry, exit, event) ~ 1,
+         id = "id",
+         transition = "enum",
+         cut = quantile(tempdata$exit, probs = seq(0, 1, length.out = 21))) %>%
+  group_by(id) %>%
+  mutate(event = ifelse(sum(event) > max(enum), )) %>%
+  ungroup()
+## ende
+
+# temp <- temp %>%
+#   mutate(enum_strata = as.factor(ifelse(enum > 1,"recurrent","first"))) 
+# falsch weil das erste auftreten einer id ist ja das first event
+
+
+# interpretieren von temp datensatz
+# enum ist für jede id erstmal 0, weil noch bei keinem das event aufgetreten ist
+# dann wird jede intervalgröße durchgegangen und geschaut ob in dieser zeitspanne en event passiert ist
+# wenn ja ist der nächsten zeile enum_i + 1 und es wird wieder jede intervallgröße durchgegangen
+# ped_status == 1 bedeutet recurrent event tritt ein
+# ped_status == 0 bedeutet kein event oder zensiert
+# wenn kein event dann gehts zur nächsten intervallgröße über
+# wenn zensiert dann enden die spalten für die id
+
+mod <- pamm(ped_status ~ #s(id, bs = "re") + 
+              s(tend, by = as.factor(enum)),
+            data=temp, 
+            engine   = "bam", 
+            method   = "fREML")
+
+# plot(mod)
+# gam.check(mod)
+summary(mod)
+
+
+library(tidyverse)
+
+temp %>%
+  make_newdata(
+    tend = unique(tend),
+    enum = unique(enum)
+    ) %>%
+  add_hazard(mod, type = "response") # %>%
+#   ggplot(aes(x = tend, y = hazard)) +
+#   geom_line() +
+#   #geom_ribbon(aes(ymin  = ci_lower, ymax = ci_upper), alpha = .3) +
+#   ylab(expression(hat(h)(t))) + #xlab("Time (months)") +
+#   #scale_x_continuous(limits = c(0, max(temp$tend)),breaks=seq(0,12,2),expand=c(0,0)) +
+#   facet_wrap(~enum)
+
+
+temp %>%
+  make_newdata(
+    tend = unique(tend),
+    enum = unique(enum)
+    ) %>%
+  group_by(enum) %>%
+  add_surv_prob(mod) %>% ungroup() %>% group_by(tend)%>%summarise(sum(surv_prob))
+
+
+cbind(temp, mod$fitted.values)
+
+
+
+```
+
+```{r multistate}
+
+library(pammtools)
+
+set.seed(111)
+
+tempdata <- sim(repN=1, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[1]])[[1]]
+
+temp <- tempdata %>%
+  mutate(enum = from,
+         event = ifelse(to != "cens", 1, 0)) %>%
+  as_ped_multistate(Surv(entry, exit, event) ~ 1 # exit
+                    ,
+         id = "id",
+         transition = "enum" ,
+         #cut = quantile(tempdata$exit, probs = seq(0, 1, length.out = 21)),
+         timescale = "calendar"
+         )
+
+
+
+
+ggplot(temp) +
+  geom_bar(aes(x = enum, y = stat(count / sum(count))))
+
+unique(temp$exit)
+
+c(mean(temp$ped_status), var(temp$ped_status))
+
+mod <- pamm(ped_status ~  s(tend, by = enum)  #+ s(id, bs = "re") 
+            ,
+            data=temp, 
+            engine   = "bam", 
+            method   = "fREML",
+            offset = offset,
+            discrete = TRUE,
+            family = poisson(),
+            timescale = "calendar")
+
+summary(mod)
+plot(mod)
+
+##################### negative binomial
+library(MASS)
+
+mod <- glm.nb(ped_status ~ tend  
+            ,
+            data=temp)
+#####################
+
+# cbind(temp, fit = mod$fitted.values) %>%
+#   # mutate(time = ifelse(exp(offset) == tend, tend, exp(offset) + tstart)) %>%
+#   group_by(id) %>%
+#   summarise(est_enum40 = sum(fit[exit<=40]),
+#             est_enum60 = sum(fit[exit<=60]),
+#             est_enum80 = sum(fit[exit<=80]),
+#             est_enum100 = sum(fit[exit<=100])) %>%
+#   ungroup() %>%
+#   select(-id) %>%
+#   colMeans()
+
+
+temp %>% 
+  add_cumu_hazard(mod)
+## testen mit transition prob
+
+test <- temp %>% 
+  mutate(intlen=tend-tstart) %>% 
+  # add_cumu_hazard(mod, ci=FALSE) %>% 
+  add_surv_prob(mod, ci=FALSE) %>% 
+  mutate(distribution = 1 - surv_prob)
+
+
+test <- test %>% 
+  group_by(id) %>% 
+  mutate(dens = c(min(distribution), diff(distribution)))
+
+
+
+
+test <- temp %>% 
+  make_newdata(
+    from = unique(enum),
+    to = unique(enum)
+  )
+
+### ende transition prob
+
+
+
+cbind(temp, fit = mod$fitted.values) %>%
+  mutate(time = ifelse(exp(offset) == tend, tend, exp(offset) + tstart)) %>%
+  group_by(id) %>%
+  summarise(est_enum40 = sum(fit[time<=40]),
+            est_enum60 = sum(fit[time<=60]),
+            est_enum80 = sum(fit[time<=80]),
+            est_enum100 = sum(fit[time<=100])) %>%
+  ungroup() %>%
+  #select(-id) %>%
+  colMeans()
+
+# hier * enum für erwartungswert ??
+cbind(temp, fit = mod$fitted.values) %>%
+  mutate(time = ifelse(exp(offset) == tend, tend, exp(offset) + tstart)) %>%
+  mutate(exp = enum * fit) %>% 
+  group_by(id) %>%
+  summarise(est_enum40 = sum(exp[time<=40]),
+            est_enum60 = sum(exp[time<=60]),
+            est_enum80 = sum(exp[time<=80]),
+            est_enum100 = sum(exp[time<=100])) %>%
+  ungroup() %>%
+  select(-id) %>%
+  colMeans()
+  
+
+c(cbind(temp, fit = mod$fitted.values) %>%
+  # mutate(time = ifelse(exp(offset) == tend, tend, exp(offset) + tstart)) %>%
+  group_by(id)%>%
+    summarise(sum(fit))%>%select(-id)%>%colMeans(), mean(True1))
+  
+
+  # hier mal schauen ob man x*f(x) iwie berechnen kann
+# test <- temp %>%
+#   make_newdata(
+#     tend = unique(tend),
+#     enum = unique(enum)) %>%
+#   add_hazard(mod)
+
+sum(test$hazard * test$enum)
+
+```
+
+```{r}
+
+set.seed(111)
+tempdata <- sim(repN=100, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[1]])
+data <- data.frame()
+
+for(i in seq_along(tempdata)) {
+
+temp <- tempdata[[i]] %>%
+  mutate(enum = from,
+         event = ifelse(to != "cens", 1, 0)) %>%
+  as_ped_multistate(Surv(entry, exit, event) ~ 1,
+         id = "id",
+         transition = "enum",
+         # ,cut = quantile(tempdata[[i]]$exit, probs = seq(0, 1, length.out = 21))
+         timescale = "calendar"
+         )
+
+
+mod <- pamm(ped_status ~ s(tend)  + s(id, bs = "re")
+            ,
+            data=temp, 
+            engine   = "bam", 
+            method   = "fREML",
+            offset = offset,
+            discrete = TRUE)
+
+
+
+data <- rbind(data,
+cbind(temp, fit = mod$fitted.values) %>%
+  mutate(time = ifelse(exp(offset) == tend, tend, exp(offset) + tstart)) %>%
+  group_by(id) %>%
+  summarise(est_enum40 = sum(fit[time<=40]),
+            est_enum60 = sum(fit[time<=60]),
+            est_enum80 = sum(fit[time<=80]),
+            est_enum100 = sum(fit[time<=100])) %>%
+  ungroup() %>%
+  select(-id) %>%
+  colMeans())
+
+# # hier * enum für erwartungswert ??
+# data <- rbind(data, 
+# cbind(temp, fit = mod$fitted.values) %>%
+#   mutate(time = ifelse(exp(offset) == tend, tend, exp(offset) + tstart)) %>%
+#   mutate(exp = enum * fit) %>% 
+#   group_by(id) %>%
+#   summarise(est_enum40 = sum(exp[time<=40]),
+#             est_enum60 = sum(exp[time<=60]),
+#             est_enum80 = sum(exp[time<=80]),
+#             est_enum100 = sum(exp[time<=100])) %>%
+#   ungroup() %>%
+#   select(-id) %>%
+#   colMeans())
+
+}
+
+
+
+# unname(data %>% colMeans()) - True1
+
+
+sapply(1:4, function(i) {
+bias_rmse(unname(data %>% colMeans())[i] , True1[i])
+}
+)
+
+
+```
+
+
+
+
+```{r etm ausprobieren}
+# Load necessary package
+library(etm)
+
+# Create a simple sample dataset
+tempdata[[1]]
+
+
+# Transition matrix
+
+bb <- tempdata[[1]] %>% filter(to!="cens")
+tra <- matrix(FALSE,
+              nrow = max(as.numeric(bb$to))+2,
+              ncol = max(as.numeric(bb$to))+2)
+
+for (i in 1:(max(as.numeric(bb$to)) + 1)) {
+      tra[i, i + 1] <- TRUE
+    }
+
+
+
+# Fit the model using etm
+model <- etm(tempdata[[1]], 0:(max(as.numeric(bb$to))+1), tra, "cens", 0, 100, covariance = FALSE)
+
+# Summary of the model
+summary(model)
+
+time <- model[["time"]][model[["time"]] <= 40]
+last <- length(time)
+
+sum(sapply(1:(max(as.numeric(bb$to)) + 1), function(i) {
+        ## i*P(X(t)=i)
+        summand <- i * 
+          model[["est"]][1, i + 1, last]
+        return(summand)
+      }))
+
+
+
+model[["est"]][1, 3, 146]
+```
+```{r}
+dat <- data.frame("bias" = c(0.27, 1.07, 0.95, 0.05, 0.33, 1.09, 1.12, 
+                             0.58, -0.24, 0.71, 0.72, 0.06, -0.24, 0.73, 
+                             0.70, -0.15 ),
+                  "tp" = rep(c(40, 60, 80, 100), 4),
+                  "est" = rep(c("AJ", "NA", "EB1", "EB2"), each = 4)) # scenario 1 N=100
+
+ggplot(dat, aes(tp, bias, color=est))+geom_point()+ylim(-20, 20)
+
+### sieht den paper ergebnissen ganz ähnlich
+
+
+
+
+```
+
