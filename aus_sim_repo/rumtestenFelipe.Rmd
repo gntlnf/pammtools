@@ -459,7 +459,7 @@ mod <- pamm(ped_status ~ #s(id, bs = "re") +
 summary(mod)
 
 
-library(tidyverse)
+library(pammtools)
 
 temp %>%
   make_newdata(

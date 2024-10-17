@@ -8,7 +8,13 @@ True2 <- c(1.815338, 2.593804, 3.291802, 3.905253)
 
 set.seed(111)
 
+devtools::load_all()
+
 tempdata <- sim(repN=1, true_mean=trueMeanMaster[[1]], scenario=scenarioMaster[[1]])[[1]]
+
+
+###
+save(tempdata, file = "Johannes_transition_prob/tempdata.rda")
 
 temp <- tempdata %>%
   mutate(enum = from,
@@ -17,14 +23,15 @@ temp <- tempdata %>%
   as_ped(Surv(entry, exit, event) ~  1 # exit
                     ,
                     id = "id",
-                    transition = "transition" ,
+                    transition = "enum"#"transition"
+         ,
                     #cut = quantile(tempdata$exit, probs = seq(0, 1, length.out = 21)),
                     timescale = "calendar"
   )
 
 
 
-mod <- pamm(ped_status ~  s(tend, by = transition)  #+ s(id, bs = "re") 
+mod <- pamm(ped_status ~  s(tend, by = transition) + transition #+ s(id, bs = "re") 
             ,
             data=temp, 
             engine   = "bam", 
@@ -32,15 +39,12 @@ mod <- pamm(ped_status ~  s(tend, by = transition)  #+ s(id, bs = "re")
             offset = offset,
             discrete = TRUE,
             family = poisson())
+###
 
 summary(mod)
-plot(mod)
+plot(mod,page=1,xlim=c(0,100))
 
-temp %>% 
-  make_newdata(tend = unique(tend),
-               enum = unique(enum)) %>%  
-  mutate(transition = enum) %>% 
-  add_trans_prob(mod)
+
 
 
 cbind(temp, fit = mod$fitted.values) %>%
@@ -102,15 +106,46 @@ colMeans(data)
 
 
 
+# hier probieren den datensatz auf alle möglichen transition zu erweitern
+test <- tempdata %>% 
+  mutate(transition = as.factor(paste0(from, "->", to)),
+         tstart = entry,
+         tstop = exit,
+         status = ifelse(to != "cens", 1, 0)) %>% 
+  add_counterfactual_transitions(
+    from_col = "from", 
+    to_col = "to", 
+    transition_col = "transition")
 
 
 
 
+meeting_temp <- make_newdata(temp,
+             tend = unique(tend),
+             transition = unique(transition)) 
+
+m
+  group_by(transition) %>%
+  add_trans_prob(mod)
 
 
 
 
 # hier irrelevant erstmal
+
+
+# hier probieren den datensatz auf alle möglichen transition zu erweitern
+test <- tempdata %>% 
+  mutate(transition = as.factor(paste0(from, "->", to)),
+         tstart = entry,
+         tstop = exit,
+         status = ifelse(to != "cens", 1, 0)) %>% 
+  add_counterfactual_transitions(
+    from_col = "from", 
+    to_col = "to", 
+    transition_col = "transition")
+
+
 
 get_trans_prob(temp%>%mutate(intlen=tend-tstart, transition = enum)%>%get_cumu_hazard(mod))
 
@@ -119,18 +154,19 @@ get_trans_prob(temp%>%mutate(intlen=tend-tstart, transition = enum)%>%get_cumu_h
 test <- temp %>% 
   mutate(transition = paste0(enum, "->", enum+1)) %>%
   make_newdata(tend = unique(tend),
-               #enum = unique(enum),
-               transition = unique(transition)) %>%
+               enum = unique(enum),
+               #transition = unique(transition)
+               ) %>%
   group_by(transition) %>% 
   add_cumu_hazard(mod) %>% 
   add_trans_prob(mod)
 
 seqq <- list()
-for (i in 1:max(temp$enum)) {
-  seqq[[i]] <- i:max(temp$enum)
+for (i in 1:max((temp%>%group_by(id)%>%summarise(a=sum(ped_status)))$a)) {
+  seqq[[i]] <- i:max((temp%>%group_by(id)%>%summarise(a=sum(ped_status)))$a)
 }
 seqq <- unlist(seqq)
-transitions <- paste0(rep(0:(max(temp$enum)-1), 11:1), "->", 
+transitions <- paste0(rep(0:(max((temp%>%group_by(id)%>%summarise(a=sum(ped_status)))$a)-1), 11:1), "->", 
        seqq)
 
 
