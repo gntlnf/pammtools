@@ -803,11 +803,11 @@ get_trans_prob <- function(
            , to = as.numeric(gsub(".*->", "", !!transition)))
 
   # get unique transitions to build transition matrix
-  unique_transition <- data.frame(unique(newdata %>% select(!!transition, from, to)))
+  unique_transition <- data.frame(unique(newdata %>% dplyr::select(!!transition, from, to)))
   # get unique time points
   unique_tend <- data.frame(unique(newdata %>%
                                      ungroup(!!transition) %>%
-                                     select(!!tend)))
+                                     dplyr::select(!!tend)))
 
   # transition matrix
   m <- sapply(unique_transition[,c(2,3)], max) + 1 #transition starts at 0, integer of matrix at 1
@@ -871,9 +871,9 @@ get_trans_prob <- function(
   # join probabilities and return matrix
   newdata <- newdata %>%
     left_join(trans_prob_df, by=c("tend", "transition")) %>%
-    select(-delta_cumu_hazard, -from, -to)
-
-  return(newdata)
+    dplyr::select(-delta_cumu_hazard, -from, -to)
+  temp_return <- list(newdata, cum_A)
+  return(temp_return)
 
 }
 

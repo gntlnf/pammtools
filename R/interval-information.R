@@ -159,9 +159,11 @@ get_intervals.default <- function(
     left.open        = left.open,
     rightmost.closed = rightmost.closed)
 
+  # int[int > nrow(int_df)] <- nrow(int_df) # felipe versuch times zu fixen
+  
   int_df %>%
     slice(int) %>%
-    mutate(times = times) %>%
+    mutate(times = times) %>% 
     select(times, everything())
 
 }
